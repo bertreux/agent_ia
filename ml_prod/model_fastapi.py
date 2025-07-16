@@ -17,10 +17,6 @@ class TumorFeatures(BaseModel):
     size: float
     p53_concentration: float
 
-@app.get("/")
-def read_root():
-    return {"message": "Bienvenue sur l'API de prédiction"}
-
 @app.post("/predict")
 def predict_price(features: List[HouseFeatures]):
     data = [[f.taille, f.nb_chambres, f.jardin] for f in features]
