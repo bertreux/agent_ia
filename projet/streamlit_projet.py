@@ -40,7 +40,7 @@ def save_history_entry(full_query, k, n, result, display_query, filename=None):
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except FileNotFoundError:
-            st.error("Fichier d'historique non trouvé pour la mise à jour.")
+            st.session_state.error_message = "Fichier d'historique non trouvé pour la mise à jour."
             return None
 
         if "history" not in data:
@@ -85,17 +85,22 @@ def load_all_histories():
 
 def load_full_history_by_filename(filename):
     """Loads the complete history for a given filename."""
+    if not filename: # Add this check!
+        st.session_state.error_message = "Nom de fichier d'historique manquant. Impossible de charger."
+        return []
+
     filepath = os.path.join(HISTORY_DIR, filename)
     if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            try:
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if "history" in data:
                     return data["history"]
                 return [data]  # Handle older single-entry files
-            except Exception:
-                st.error(f"Erreur de lecture du fichier d'historique : {filename}")
-                return []
+        except Exception:
+            st.session_state.error_message = f"Erreur de lecture du fichier d'historique : {filename}. Il est peut-être corrompu."
+            return []
+    st.session_state.error_message = f"Fichier d'historique non trouvé : {filename}. Il a peut-être été supprimé."
     return []
 
 
@@ -108,9 +113,11 @@ def delete_history_file(filename):
         st.session_state.current_step = 0
         st.session_state.subqueries_editable = []
         st.query_params.clear()
+        st.session_state.error_message = None # Clear any error
         st.rerun()
     except Exception as e:
-        st.error(f"❌ Erreur lors de la suppression : {e}")
+        st.session_state.error_message = f"❌ Erreur lors de la suppression : {e}"
+        st.rerun()
 
 
 def delete_single_history_entry(filename, index_to_delete):
@@ -120,14 +127,16 @@ def delete_single_history_entry(filename, index_to_delete):
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        st.error("Fichier d'historique non trouvé pour la suppression.")
+        st.session_state.error_message = "Fichier d'historique non trouvé pour la suppression."
+        st.rerun()
         return
 
     if "history" not in data:
         data = {"history": [data]}
 
     if not (0 <= index_to_delete < len(data["history"])):
-        st.error("Index de synthèse invalide pour la suppression.")
+        st.session_state.error_message = "Index de synthèse invalide pour la suppression."
+        st.rerun()
         return
 
     del data["history"][index_to_delete]
@@ -138,6 +147,7 @@ def delete_single_history_entry(filename, index_to_delete):
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         st.success("🗑️ Synthèse supprimée !")
+        st.session_state.error_message = None # Clear any error
         st.query_params["entry"] = filename
         st.rerun()
 
@@ -148,14 +158,18 @@ def regenerate_and_replace_history(filename, index_to_replace, original_query, o
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        st.error("Fichier d'historique non trouvé pour la régénération.")
+        st.session_state.error_message = "Fichier d'historique non trouvé pour la régénération."
+        st.session_state.current_step = 3 # Stay on history page
+        st.rerun()
         return
 
     if "history" not in data:
         data = {"history": [data]}
 
     if not (0 <= index_to_replace < len(data["history"])):
-        st.error("Index de synthèse invalide pour la régénération.")
+        st.session_state.error_message = "Index de synthèse invalide pour la régénération."
+        st.session_state.current_step = 3 # Stay on history page
+        st.rerun()
         return
 
     # --- Progress display for regeneration ---
@@ -188,8 +202,10 @@ def regenerate_and_replace_history(filename, index_to_replace, original_query, o
             progress_callback=update_progress_for_regeneration
         )
 
-        if result is None:
-            st.error("❌ La régénération n'a pas pu aboutir à un résultat. Veuillez réessayer.")
+        if result is None or not result["synthèse"]: # Check if synthesis is empty
+            st.session_state.error_message = "❌ La régénération n'a pas pu aboutir à un résultat complet ou pertinent. Veuillez réessayer."
+            st.session_state.current_step = 3 # Stay on history page
+            st.rerun()
             return
 
         data["history"][index_to_replace] = {
@@ -207,12 +223,15 @@ def regenerate_and_replace_history(filename, index_to_replace, original_query, o
             json.dump(data, f, ensure_ascii=False, indent=2)
 
         st.success("✅ Synthèse régénérée avec succès !")
+        st.session_state.error_message = None # Clear any error
         st.query_params["entry"] = filename
         st.session_state.current_step = 3 # Go back to result display step
         st.rerun()
 
     except Exception as e:
-        st.error(f"❌ Une erreur est survenue lors de la régénération : {e}. Détails: {e}")
+        st.session_state.error_message = f"❌ Une erreur est survenue lors de la régénération : {e}. Veuillez réessayer."
+        st.session_state.current_step = 3 # Stay on history page
+        st.rerun()
     finally:
         progress_container.empty()
 
@@ -260,6 +279,8 @@ def initialize_session_state():
         st.session_state.active_query_for_research = ""
     if 'refinement_triggered' not in st.session_state:
         st.session_state.refinement_triggered = False
+    if 'error_message' not in st.session_state: # New: for persistent error messages
+        st.session_state.error_message = None
 
 
 def render_sidebar():
@@ -272,36 +293,54 @@ def render_sidebar():
 
     selected_filename_from_url = st.query_params.get("entry")
     selected_index = 0
+    current_selected_filename = None # Initialize here to ensure it's always defined
+
     if selected_filename_from_url:
         try:
             index = next((i for i, h in enumerate(histories) if h['filename'] == selected_filename_from_url), None)
             if index is not None:
                 selected_index = index + 1
-                # If we're loading from URL, we should go to step 3 to display history
+                current_selected_filename = selected_filename_from_url # Set filename if found in URL
                 st.session_state.current_step = 3
-                st.session_state.current_history_filename = selected_filename_from_url
+                st.session_state.current_history_filename = current_selected_filename
+                st.session_state.error_message = None # Clear error on history load
         except (StopIteration, ValueError):
             st.query_params.clear()
             st.session_state.current_step = 0
+            st.session_state.error_message = None # Clear error
             st.rerun()
 
+    # The radio button will return the string, we need to map it back to filename
     menu_choice = st.sidebar.radio("Menu", menu_choices, index=selected_index, key="sidebar_menu")
 
-    current_selected_filename = None
     if menu_choice == "➕ Nouvelle requête":
         if "entry" in st.query_params:
             del st.query_params["entry"]
             st.session_state.current_step = 0
             st.session_state.current_history_filename = None
+            st.session_state.error_message = None # Clear error on new query
             st.rerun()
+        # If it's a new query, current_selected_filename should be None
+        current_selected_filename = None
     else:
-        selected_entry = histories[menu_choices.index(menu_choice) - 1]
-        current_selected_filename = selected_entry["filename"]
-        if st.query_params.get("entry") != current_selected_filename:
-            st.query_params["entry"] = current_selected_filename
-            st.session_state.current_step = 3
-            st.session_state.current_history_filename = current_selected_filename
+        # Find the selected entry's filename from the histories list
+        # This covers both initial load from URL and subsequent sidebar clicks
+        try:
+            selected_entry = next(h for h in histories if f"{h.get('display_name', 'Requête sans nom')} ({h.get('timestamp', 'Inconnu')})" == menu_choice)
+            current_selected_filename = selected_entry["filename"]
+            if st.query_params.get("entry") != current_selected_filename:
+                st.query_params["entry"] = current_selected_filename
+                st.session_state.current_step = 3
+                st.session_state.current_history_filename = current_selected_filename
+                st.session_state.error_message = None # Clear error on history load
+                st.rerun()
+        except StopIteration:
+            # This case should ideally not happen if histories is correctly populated
+            # and menu_choice is valid, but good for robustness.
+            st.session_state.error_message = "Impossible de trouver l'entrée d'historique sélectionnée."
+            st.session_state.current_step = 0 # Go back to new query if something's off
             st.rerun()
+
     return current_selected_filename
 
 
@@ -344,6 +383,7 @@ def step_0_new_query():
             st.session_state.current_step = 1
             st.session_state.subqueries_editable = []
             st.session_state.refinement_triggered = False
+            st.session_state.error_message = None # Clear error on new search
             st.rerun()
         else:
             st.warning("Veuillez entrer une question pour démarrer la recherche.")
@@ -374,8 +414,9 @@ def step_1_generate_subqueries():
                 )
                 st.session_state.subqueries_editable = generated_subqueries[:]
                 progress_container.empty()  # Clear progress indicators after completion
+                st.session_state.error_message = None # Clear error on successful generation
         except Exception as e:
-            st.error(f"❌ Erreur lors de la génération des sous-questions : {e}")
+            st.session_state.error_message = f"❌ Erreur lors de la génération des sous-questions : {e}. Veuillez réessayer."
             # If subquery generation fails, decide where to send the user
             # For refinement, we want to go back to the history view
             if st.session_state.refinement_triggered:
@@ -395,6 +436,7 @@ def step_1_generate_subqueries():
         if st.button("Valider les sous-questions et continuer"):
             st.session_state.subqueries_editable = edited_subqueries
             st.session_state.current_step = 2
+            st.session_state.error_message = None # Clear error on continuing
             st.rerun()
     else:
         st.warning("Impossible de générer des sous-questions. Veuillez réessayer.")
@@ -402,10 +444,12 @@ def step_1_generate_subqueries():
             if st.button("Revenir à l'historique"):
                 st.session_state.current_step = 3
                 st.session_state.refinement_triggered = False # Reset flag
+                st.session_state.error_message = None # Clear error
                 st.rerun()
         else:
             if st.button("Revenir à la question initiale"):
                 st.session_state.current_step = 0
+                st.session_state.error_message = None # Clear error
                 st.rerun()
 
 
@@ -431,7 +475,7 @@ def step_2_perform_research():
             progress_callback=progress_callback_wrapper
         )
 
-        if final_result:
+        if final_result and final_result["synthèse"]: # Check if synthesis is not empty
             filename = save_history_entry(
                 st.session_state.active_query_for_research,
                 len(st.session_state.subqueries_editable),
@@ -444,15 +488,24 @@ def step_2_perform_research():
             st.session_state.current_history_filename = filename
             st.session_state.current_step = 3
             st.session_state.refinement_triggered = False # Reset flag after successful research
+            st.session_state.error_message = None # Clear any error on success
             st.rerun()
         else:
-            st.error("❌ La recherche n'a pas pu aboutir à un résultat complet.")
-            st.session_state.current_step = 0
+            st.session_state.error_message = "❌ La recherche n'a pas pu aboutir à un résultat complet ou pertinent. Cela peut arriver si aucun document pertinent n'a été trouvé."
+            # Decide where to go if no result is found
+            if st.session_state.refinement_triggered:
+                st.session_state.current_step = 3 # Back to history for refinement attempts
+            else:
+                st.session_state.current_step = 0 # Back to initial query for new search
             st.session_state.refinement_triggered = False # Reset flag on failure
             st.rerun()
     except Exception as e:
-        st.error(f"❌ Une erreur est survenue lors de la recherche : {e}. Détails: {e}")
-        st.session_state.current_step = 0
+        st.session_state.error_message = f"❌ Une erreur est survenue lors de la recherche : {e}. Veuillez réessayer."
+        # Decide where to go on exception
+        if st.session_state.refinement_triggered:
+            st.session_state.current_step = 3 # Back to history for refinement attempts
+        else:
+            st.session_state.current_step = 0 # Back to initial query for new search
         st.session_state.refinement_triggered = False # Reset flag on failure
         st.rerun()
     finally:
@@ -460,14 +513,23 @@ def step_2_perform_research():
 
 
 def step_3_display_history(selected_filename):
+    # This check is crucial now
+    if not selected_filename:
+        st.session_state.error_message = "Aucun historique n'est sélectionné ou l'historique a été supprimé. Veuillez choisir une autre entrée ou lancer une nouvelle requête."
+        st.session_state.current_step = 0
+        st.session_state.current_history_filename = None
+        st.rerun()
+        return # Important to return here to prevent further execution with None
+
     full_history = load_full_history_by_filename(selected_filename)
 
     if not full_history:
-        st.error("Historique non trouvé ou corrompu. Il a peut-être été supprimé.")
+        # The error message is already set by load_full_history_by_filename
         st.query_params.clear()
         st.session_state.current_step = 0
         st.session_state.current_history_filename = None
         st.rerun()
+        return # Important to return here
 
     initial_query = full_history[0].get('display_query', full_history[0].get('full_query', 'Requête sans titre'))
     st.title(f"📄 Historique de la conversation : {initial_query}")
@@ -587,6 +649,7 @@ def step_3_display_history(selected_filename):
                 st.session_state.current_history_filename = selected_filename
                 st.session_state.subqueries_editable = []
                 st.session_state.refinement_triggered = True
+                st.session_state.error_message = None # Clear error on new refinement
 
                 # Crucial: Clear the 'entry' param before moving to subquery generation
                 if "entry" in st.query_params:
@@ -623,9 +686,10 @@ def step_3_display_history(selected_filename):
                     st.session_state.subqueries_editable = generated_subqueries[:]
                 temp_progress_container.empty()
                 st.success("✅ Sous-questions générées !")
+                st.session_state.error_message = None # Clear error on successful generation
 
             except Exception as e:
-                st.error(f"❌ Erreur lors de la génération des sous-questions pour l'affinement : {e}")
+                st.session_state.error_message = f"❌ Erreur lors de la génération des sous-questions pour l'affinement : {e}"
                 st.session_state.current_step = 3
                 st.session_state.refinement_triggered = False
                 temp_progress_container.empty()
@@ -642,6 +706,7 @@ def step_3_display_history(selected_filename):
             if st.button("Valider et Lancer la recherche d'affinement", key="launch_refinement_research"):
                 st.session_state.subqueries_editable = edited_refinement_subqueries
                 st.session_state.current_step = 2
+                st.session_state.error_message = None # Clear error on continuing
                 st.rerun()
         else:
             st.warning("Aucune sous-question n'a pu être générée pour l'affinement. Veuillez modifier votre demande.")
@@ -671,7 +736,20 @@ def step_3_display_history(selected_filename):
 def main():
     setup_page_config()
     initialize_session_state()
+
+    # Display persistent error message if it exists
+    if st.session_state.error_message:
+        st.error(st.session_state.error_message)
+
     current_selected_filename = render_sidebar()
+
+    # Crucial check: Ensure current_selected_filename is not None when entering step 3
+    if st.session_state.current_step == 3 and current_selected_filename is None:
+        st.session_state.error_message = "Impossible d'afficher l'historique car aucun fichier n'a été sélectionné ou trouvé."
+        st.session_state.current_step = 0 # Redirect to new query page
+        st.rerun()
+        return # Stop execution to prevent the TypeError
+
 
     if st.session_state.current_step == 0:
         step_0_new_query()
