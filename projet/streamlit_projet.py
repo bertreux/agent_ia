@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime
 from deep_research import deep_research
+import pyperclip
 from streamlit.components.v1 import html
 
 HISTORY_DIR = "historique"
@@ -59,6 +60,88 @@ def update_history(filename, full_query, k, n, result, display_query):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
     return filename
+
+def regenerate_and_replace_history(filename, index_to_replace, original_query, original_k, original_n, original_display_query):
+    filepath = os.path.join(HISTORY_DIR, filename)
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        st.error("Fichier d'historique non trouvé pour la régénération.")
+        return
+
+    if "history" not in data:
+        data = {"history": [data]}
+
+    if not (0 <= index_to_replace < len(data["history"])):
+        st.error("Index de synthèse invalide pour la régénération.")
+        return
+
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+
+    def update_progress(percentage, status_message):
+        progress_bar.progress(percentage)
+        progress_text.info(f"💡 {status_message}")
+
+    try:
+        result = deep_research(original_query, original_n, original_k, progress_callback=update_progress)
+
+        if result is None:
+            st.error("❌ La régénération n'a pas pu aboutir à un résultat. Veuillez réessayer.")
+            return
+
+        # Replace the existing entry with the new result
+        data["history"][index_to_replace] = {
+            "full_query": original_query,
+            "display_query": original_display_query, # Keep original display name
+            "k": original_k,
+            "n": original_n,
+            "result": result["synthèse"],
+            "subqueries": result["sous_questions"],
+            "sources_by_subquery": result["sources"],
+            "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S") # Update timestamp
+        }
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        st.query_params["entry"] = filename # Ensure we stay on this history
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"❌ Une erreur est survenue lors de la régénération : {e}. Détails: {e}")
+    finally:
+        progress_bar.empty()
+        progress_text.empty()
+
+def delete_single_history_entry(filename, index_to_delete):
+    filepath = os.path.join(HISTORY_DIR, filename)
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        st.error("Fichier d'historique non trouvé pour la suppression.")
+        return
+
+    if "history" not in data:
+        data = {"history": [data]}
+
+    if not (0 <= index_to_delete < len(data["history"])):
+        st.error("Index de synthèse invalide pour la suppression.")
+        return
+
+    del data["history"][index_to_delete]
+
+    if not data["history"]: # If no entries left, delete the file
+        delete_history_file(filename) # Use existing delete file function
+    else:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        st.success("🗑️ Synthèse supprimée !")
+        st.query_params["entry"] = filename # Stay on this history
+        st.rerun()
+
 
 def load_all_histories():
     entries = []
@@ -130,6 +213,10 @@ def run_deep_research(query, k, n, display_query=None, history_filename=None):
     try:
         result = deep_research(query, n, k, progress_callback=update_progress)
 
+        if result is None:
+            st.error("❌ La recherche profonde n'a pas pu aboutir à un résultat. Veuillez réessayer.")
+            return
+
         if history_filename:
             filename = update_history(history_filename, query, k, n, result, display_query=display_query)
         else:
@@ -138,7 +225,7 @@ def run_deep_research(query, k, n, display_query=None, history_filename=None):
         st.query_params["entry"] = filename
         st.rerun()
     except Exception as e:
-        st.error(f"❌ Une erreur est survenue lors de la recherche : {e}")
+        st.error(f"❌ Une erreur est survenue lors de la recherche : {e}. Détails: {e}")
     finally:
         progress_bar.empty()
         progress_text.empty()
@@ -224,7 +311,39 @@ else:
                 unsafe_allow_html=True
             )
             with st.container(border=True):
-                st.markdown(entry["result"])
+                st.markdown(entry['result'])
+
+                col_buttons = st.columns([1, 1, 1]) # Three columns for Copy, Regenerate, Delete
+
+                with col_buttons[0]:
+                    if st.button("📋 Copier", key=f"copy_button_{i}"):
+                        try:
+                            pyperclip.copy(entry['result'])
+                            st.toast("Synthèse copiée (sur le serveur) !")
+                        except Exception as e:
+                            st.toast(f"Erreur de copie (sur le serveur): {e}. Note: Ceci ne copie PAS sur le presse-papiers de votre navigateur.")
+
+                with col_buttons[1]:
+                    if st.button("♻️ Régénérer", key=f"regenerate_button_{i}"):
+                        st.info("Régénération en cours...")
+                        # Get the original parameters for regeneration
+                        original_full_query = entry['full_query']
+                        original_k = entry['k']
+                        original_n = entry['n']
+                        original_display_query = entry.get('display_query', original_full_query)
+
+                        regenerate_and_replace_history(
+                            selected_filename,
+                            i, # Pass the index of the entry to replace
+                            original_full_query,
+                            original_k,
+                            original_n,
+                            original_display_query
+                        )
+                with col_buttons[2]:
+                    if st.button("🗑️ Supprimer", key=f"delete_single_button_{i}"):
+                        delete_single_history_entry(selected_filename, i)
+
 
         with col2:
             with st.container(border=True):
@@ -243,9 +362,11 @@ else:
                     st.markdown("### 🌐 Sites scrappés")
                     for group in entry["sources_by_subquery"]:
                         st.markdown(f"**Sous-question :** {group['subquestion']}")
-                        for url in group["urls"]:
-                            st.markdown(f"- [{url}]({url})")
-
+                        if group["urls"]:
+                            for url in group["urls"]:
+                                st.markdown(f"- [{url}]({url})")
+                        else:
+                            st.markdown("  *Aucun site pertinent trouvé pour cette sous-question.*")
         st.markdown("---")
 
     st.markdown("### 🔍 Affiner ou poursuivre cette recherche")
@@ -278,13 +399,16 @@ else:
 
     st.markdown("---")
 
-    if st.button("🗑️ Supprimer cet historique"):
-        delete_history_file(selected_filename)
+    col_bottom_buttons = st.columns([1, 4])
+    with col_bottom_buttons[0]:
+        if st.button("🗑️ Supprimer cet historique"):
+            delete_history_file(selected_filename)
 
     st.markdown("\n")
 
+    # Scroll to bottom feature
     st.markdown('<div id="scroll-to-here"></div>', unsafe_allow_html=True)
-    js = """
+    js_scroll = """
     <script>
         var element = window.parent.document.getElementById('scroll-to-here');
         if (element) {
@@ -292,4 +416,4 @@ else:
         }
     </script>
     """
-    html(js, height=0)
+    html(js_scroll, height=0)

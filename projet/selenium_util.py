@@ -48,6 +48,7 @@ def initialize_driver(headers_list, proxy_list):
 
     user_agent = random.choice(headers_list)['User-Agent']
     options.add_argument(f"user-agent={user_agent}")
+
     proxy = random.choice(proxy_list)
     if proxy:
         options.add_argument(f"--proxy-server={proxy}")
