@@ -1,5 +1,5 @@
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Use relative imports for modules within the same package
 from .selenium_util import scrape_worker_threaded
@@ -147,7 +147,7 @@ def _fetch_and_scrape_urls(subqueries: list[str], n_results: int, visited_urls: 
 def _process_documents(query: str, subqueries: list[str], documents_by_subq: dict, n_results: int, visited_urls: set,
                        progress_callback, max_new_url_attempts: int = 5) -> list[dict]:
     """
-    Processes scraped documents by validating their relevance and summarizing them.
+    Processes scraped documents by validating their relevance and summarizing them using threads.
     Also handles replacement document search if initial documents are insufficient.
 
     Args:
@@ -159,6 +159,8 @@ def _process_documents(query: str, subqueries: list[str], documents_by_subq: dic
         progress_callback: A function to update the UI's progress.
         max_new_url_attempts: The maximum number of *new, unvisited* URLs to attempt for each subquery
                               if initial documents are insufficient.
+        max_retry_document: The absolute maximum number of search results to iterate through
+                              for replacement URLs (this acts as a limit on 'i').
 
     Returns:
         A list of validated and summarized relevant documents.
@@ -167,6 +169,8 @@ def _process_documents(query: str, subqueries: list[str], documents_by_subq: dic
     progress_callback(60, ALL_STEPS[current_step_idx], current_step_idx)
     validated_summaries = []
 
+    MAX_DOC_ANALYSIS_WORKERS = 4
+
     for subq_idx, subq in enumerate(subqueries):
         progress_for_subq = 60 + int(20 * (subq_idx / len(subqueries)))
         progress_callback(progress_for_subq, f"{ALL_STEPS[current_step_idx]} : {subq}", current_step_idx)
@@ -174,93 +178,130 @@ def _process_documents(query: str, subqueries: list[str], documents_by_subq: dic
         print(f"\n--- Traitement de la sous-question : {subq} ---")
         relevant_docs_for_subq = []
 
+        # --- Phase 1: Process Initial Documents ---
+        docs_to_analyze_initial = []
         initial_docs = documents_by_subq.get(subq, [])
         for doc in initial_docs:
             if len(relevant_docs_for_subq) >= n_results:
                 break
 
-            # Add initial document URLs to visited_urls to avoid re-processing later
             if doc.get("url"):
                 visited_urls.add(doc.get("url"))
 
             if len(doc.get("paragraphs", "")) > 100:
-                response_data = validate_and_summarize_document(query, subq, doc.get('paragraphs'))
-                if response_data.get("is_relevant", False):
-                    relevant_docs_for_subq.append({
-                        "url": doc.get("url"),
-                        "subquestion": doc.get("subquestion"),
-                        "title": doc.get("title"),
-                        "summary": response_data.get("summary")
-                    })
-                    print(f"✅ Document pertinent trouvé : {doc.get('url')}")
-                else:
-                    print(f"⚠️ Document de {doc.get('url')} jugé non pertinent.")
+                docs_to_analyze_initial.append(doc)
             else:
                 if doc.get("paragraphs", "").strip():
                     relevant_docs_for_subq.append({
                         "url": doc.get("url"),
                         "subquestion": doc.get("subquestion"),
                         "title": doc.get("title"),
-                        "summary": doc.get("paragraphs")  # Use raw content if too short for summarization
+                        "summary": doc.get("paragraphs")
                     })
                     print(f"✅ Document court mais pertinent trouvé : {doc.get('url')}")
                 else:
                     print(f"⚠️ Document de {doc.get('url')} est vide. Ignoré.")
 
+        with ThreadPoolExecutor(max_workers=MAX_DOC_ANALYSIS_WORKERS) as executor:
+            future_to_doc = {
+                executor.submit(validate_and_summarize_document, query, subq, doc.get('paragraphs')): doc
+                for doc in docs_to_analyze_initial
+            }
+            for future in as_completed(future_to_doc):
+                if len(relevant_docs_for_subq) >= n_results:
+                    for f in future_to_doc:
+                        f.cancel()
+                    break
+
+                doc = future_to_doc[future]
+                try:
+                    response_data = future.result()
+                    if response_data.get("is_relevant", False):
+                        relevant_docs_for_subq.append({
+                            "url": doc.get("url"),
+                            "subquestion": doc.get("subquestion"),
+                            "title": doc.get("title"),
+                            "summary": response_data.get("summary")
+                        })
+                        print(f"✅ Document pertinent trouvé : {doc.get('url')}")
+                    else:
+                        print(f"⚠️ Document de {doc.get('url')} jugé non pertinent.")
+                except Exception as exc:
+                    print(f"❌ Erreur lors de l'analyse du document {doc.get('url')}: {exc}")
+
         current_step_idx_retry = 6
-        # Only proceed to fetch new URLs if we don't have enough documents
         if len(relevant_docs_for_subq) < n_results:
             print(f"♻️ Nombre de documents pertinents insuffisant pour '{subq}'. Recherche d'URLs de remplacement.")
             progress_callback(progress_for_subq,
                               f"{ALL_STEPS[current_step_idx_retry]} : {subq} (recherche de remplacement)",
                               current_step_idx_retry)
 
-            # Fetch more search results than max_new_url_attempts, just in case many are already visited
-            new_results_to_check = fetch_search_results_with_googlesearch(subq, max_new_url_attempts * 2) # Fetch more to have options
+            new_results_to_check = fetch_search_results_with_googlesearch(subq, (max_retry_document or 10) + max_new_url_attempts * 2)
             new_urls_attempted_count = 0
             i = 0
 
+            docs_to_analyze_replacement = []
+            replacement_doc_futures_map = {}
+
             for new_title, new_url in new_results_to_check:
-                # Stop if we have enough results or have attempted max_new_url_attempts *new* URLs
-                if len(relevant_docs_for_subq) >= n_results or new_urls_attempted_count >= max_new_url_attempts or i >= (max_retry_document + 1):
+                if (len(relevant_docs_for_subq) >= n_results or
+                    new_urls_attempted_count >= max_new_url_attempts or
+                    i >= (max_retry_document or float('inf'))):
                     break
 
                 if new_url not in visited_urls:
                     print(f"✅ Nouvelle URL de remplacement potentielle : {new_url}")
-                    visited_urls.add(new_url) # Mark as visited immediately upon attempt
-                    new_urls_attempted_count += 1 # Increment only for truly new URLs we are processing
+                    visited_urls.add(new_url)
+                    new_urls_attempted_count += 1
 
                     new_doc = scrape_worker_threaded({"url": new_url, "subquestion": subq})
 
-                    if new_doc and len(new_doc.get("paragraphs", "")) > 100:
-                        response_data = validate_and_summarize_document(query, subq, new_doc.get('paragraphs'))
-                        if response_data.get("is_relevant", False):
+                    if new_doc:
+                        if len(new_doc.get("paragraphs", "")) > 100:
+                            docs_to_analyze_replacement.append(new_doc)
+                        elif new_doc.get("paragraphs", "").strip():
                             relevant_docs_for_subq.append({
                                 "url": new_doc.get("url"),
                                 "subquestion": new_doc.get("subquestion"),
                                 "title": new_doc.get("title"),
+                                "summary": new_doc.get("paragraphs")
+                            })
+                            print(f"✅ Document de remplacement court mais pertinent trouvé : {new_doc.get('url')}")
+                        else:
+                            print(f"⚠️ Document de {new_doc.get('url')} est vide ou trop court. Ignoré.")
+                    i += 1
+                else:
+                    print(f"ℹ️ URL {new_url} déjà visitée ou en cours de traitement. Passons à la suivante.")
+
+            with ThreadPoolExecutor(max_workers=MAX_DOC_ANALYSIS_WORKERS) as executor:
+                future_to_doc = {
+                    executor.submit(validate_and_summarize_document, query, subq, doc.get('paragraphs')): doc
+                    for doc in docs_to_analyze_replacement
+                }
+                for future in as_completed(future_to_doc):
+                    if len(relevant_docs_for_subq) >= n_results:
+                        for f in future_to_doc:
+                            f.cancel()
+                        break
+
+                    doc = future_to_doc[future]
+                    try:
+                        response_data = future.result()
+                        if response_data.get("is_relevant", False):
+                            relevant_docs_for_subq.append({
+                                "url": doc.get("url"),
+                                "subquestion": doc.get("subquestion"),
+                                "title": doc.get("title"),
                                 "summary": response_data.get("summary")
                             })
                             print(f"✅ Document de remplacement pertinent trouvé et ajouté.")
                         else:
-                            print(f"⚠️ Document de {new_doc.get('url')} jugé non pertinent.")
-                    elif new_doc and new_doc.get("paragraphs", "").strip():
-                        relevant_docs_for_subq.append({
-                            "url": new_doc.get("url"),
-                            "subquestion": new_doc.get("subquestion"),
-                            "title": new_doc.get("title"),
-                            "summary": new_doc.get("paragraphs")
-                        })
-                        print(f"✅ Document de remplacement court mais pertinent trouvé : {new_doc.get('url')}")
-                    else:
-                        print(f"⚠️ Document de {new_doc.get('url')} est vide ou trop court. Ignoré.")
-                else:
-                    print(f"ℹ️ URL {new_url} déjà visitée ou en cours de traitement. Passons à la suivante.")
-
-                i = i + 1
+                            print(f"⚠️ Document de {doc.get('url')} jugé non pertinent.")
+                    except Exception as exc:
+                        print(f"❌ Erreur lors de l'analyse du document de remplacement {doc.get('url')}: {exc}")
 
             if len(relevant_docs_for_subq) < n_results:
-                print(f"❌ Impossible d'atteindre le nombre requis de documents pour '{subq}' après avoir essayé {new_urls_attempted_count} nouvelles URLs.")
+                print(f"❌ Impossible d'atteindre le nombre requis de documents pour '{subq}' après avoir essayé {i} nouvelles URLs et parcouru {i} résultats de recherche.")
 
         validated_summaries.extend(relevant_docs_for_subq)
 
