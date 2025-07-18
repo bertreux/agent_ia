@@ -3,7 +3,11 @@ import streamlit as st
 import hashlib
 import json
 from datetime import datetime
-from deep_research import generate_subqueries_for_ui, perform_full_research, ALL_STEPS
+#from agent.deep_research import generate_subqueries_for_ui, perform_full_research, ALL_STEPS
+
+import sys
+sys.path.append(os.path.dirname(__file__))
+from agent.main_workflow import generate_subqueries_for_ui, perform_full_research, ALL_STEPS
 import pyperclip
 from streamlit.components.v1 import html
 

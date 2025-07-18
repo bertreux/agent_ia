@@ -3,7 +3,7 @@ import json
 from mistralai import Mistral
 from selenium_util import scrape_worker_threaded
 from google_search import fetch_search_results_with_googlesearch
-from config import model, max_thread, max_synth_retries, max_retry_document
+from projet.agent.config import model, max_thread, max_synth_retries, max_retry_document
 from concurrent.futures import ThreadPoolExecutor
 
 # --- Global Configuration/State (mimicking parts of the class for clarity) ---

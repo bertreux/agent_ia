@@ -1,5 +1,5 @@
 import os
-import config
+from .config import HEADERS, PROXIES, certify
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -10,9 +10,8 @@ from selenium.webdriver.chrome.options import Options
 import logging
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import StaleElementReferenceException
-from config import HEADERS, PROXIES
 
-os.environ['REQUESTS_CA_BUNDLE'] = config.certify
+os.environ['REQUESTS_CA_BUNDLE'] = certify
 
 def initialize_driver(headers_list, proxy_list):
     logging.getLogger('selenium').setLevel(logging.ERROR)
