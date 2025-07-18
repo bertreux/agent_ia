@@ -395,7 +395,7 @@ def step_0_new_query():
 
 def step_1_generate_subqueries():
     """Renders the UI for generating and reviewing sub-queries."""
-    st.subheader("Étape 1: Génération et révision des sous-questions")
+    st.subheader("Génération et révision des sous-questions")
     st.write(
         "L'IA a généré les sous-questions suivantes pour approfondir votre recherche. Vous pouvez les modifier si vous le souhaitez.")
 
@@ -459,7 +459,7 @@ def step_1_generate_subqueries():
 
 def step_2_perform_research():
     """Renders the UI for ongoing research and displays progress."""
-    st.subheader("Étape 2: Recherche en cours...")
+    st.subheader("Recherche en cours...")
     st.write("Veuillez patienter pendant que l'IA collecte et synthétise les informations.")
 
     progress_container = st.container()
